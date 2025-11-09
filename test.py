@@ -6,7 +6,24 @@ import torch.nn.functional as F
 
 def test(params, model, testset, category):
     model.eval()
-    (test_queries, test_targets, name) = (testset.test_queries, testset.test_targets, category)
+    # Support datasets that expose per-category test queries/targets (FashionIQ)
+    if hasattr(testset, 'test_queries') and hasattr(testset, 'test_targets'):
+        (test_queries, test_targets, name) = (testset.test_queries, testset.test_targets, category)
+    elif category == 'dress' and hasattr(testset, 'test_queries_dress'):
+        (test_queries, test_targets, name) = (testset.test_queries_dress, testset.test_targets_dress, 'dress')
+    elif category == 'shirt' and hasattr(testset, 'test_queries_shirt'):
+        (test_queries, test_targets, name) = (testset.test_queries_shirt, testset.test_targets_shirt, 'shirt')
+    elif category == 'toptee' and hasattr(testset, 'test_queries_toptee'):
+        (test_queries, test_targets, name) = (testset.test_queries_toptee, testset.test_targets_toptee, 'toptee')
+    else:
+        raise AttributeError(f"Dataset does not provide test queries/targets for category '{category}'")
+    # Optionally cap evaluation size for quick debugging
+    max_eval_queries = getattr(params, 'max_eval_queries', 0)
+    max_eval_targets = getattr(params, 'max_eval_targets', 0)
+    if max_eval_queries and max_eval_queries > 0:
+        test_queries = test_queries[:max_eval_queries]
+    if max_eval_targets and max_eval_targets > 0:
+        test_targets = test_targets[:max_eval_targets]
     with torch.no_grad():
         all_queries = []
         all_imgs = []
@@ -98,6 +115,12 @@ def test_figAll(params, model, testset, category):
         (test_queries, test_targets, name) = (testset.test_queries_shirt, testset.test_targets_shirt, 'shirt')
     elif category == 'toptee':
         (test_queries, test_targets, name) = (testset.test_queries_toptee, testset.test_targets_toptee, 'toptee')
+    max_eval_queries = getattr(params, 'max_eval_queries', 0)
+    max_eval_targets = getattr(params, 'max_eval_targets', 0)
+    if max_eval_queries and max_eval_queries > 0:
+        test_queries = test_queries[:max_eval_queries]
+    if max_eval_targets and max_eval_targets > 0:
+        test_targets = test_targets[:max_eval_targets]
     # (test_queries, test_targets, name) = (testset.test_queries, testset.test_targets, category)
     with torch.no_grad():
         all_queries = []
@@ -183,6 +206,12 @@ def test_cirr_valset(params, model, testset):
     
     model.eval()
     test_queries, test_targets = testset.val_queries, testset.val_targets
+    max_eval_queries = getattr(params, 'max_eval_queries', 0)
+    max_eval_targets = getattr(params, 'max_eval_targets', 0)
+    if max_eval_queries and max_eval_queries > 0:
+        test_queries = test_queries[:max_eval_queries]
+    if max_eval_targets and max_eval_targets > 0:
+        test_targets = test_targets[:max_eval_targets]
     with torch.no_grad():
         all_queries = []
         all_imgs = []

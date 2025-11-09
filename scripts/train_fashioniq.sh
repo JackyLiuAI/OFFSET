@@ -6,7 +6,7 @@
 
 # Root paths (ensure trailing slash for fashioniq_path)
 PROJECT_ROOT="/DATA/home/ljq/Projects/OFFSET"
-FASHIONIQ_ROOT="/DATA/home/ljq/Projects/OFFSET/data/fashionIQ_dataset/"  # must end with '/'
+FASHIONIQ_ROOT="/DATA/home/ljq/Projects/OFFSET/data/fashionIQ/"  # must end with '/'
 
 # Training configuration (you can adjust values below as needed)
 LOCAL_RANK="-1"
@@ -41,7 +41,7 @@ LR_DECAY=5
 LR_DIV=0.1
 MAX_DECAY_EPOCH=10
 TOLERANCE_EPOCH=5
-IF_SAVE=0
+IF_SAVE=1
 
 MODEL_DIR="${PROJECT_ROOT}/checkpoints"
 SAVE_SUMMARY_STEPS=5
