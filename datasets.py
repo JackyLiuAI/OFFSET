@@ -419,17 +419,40 @@ class CIRR_SavedSegment(torch.utils.data.Dataset):
             self.train_image_path = json.load(f)
             self.train_image_name = list(self.train_image_path.keys()) 
 
-        with open(os.path.join(self.path, 'image_captions_cirr_train.json'), 'r') as f:
-            self.train_captions = json.load(f)
+        # Optional aggregated caption/keyword files; fall back gracefully if missing
+        train_caps_path = os.path.join(self.path, 'image_captions_cirr_train.json')
+        if os.path.exists(train_caps_path):
+            with open(train_caps_path, 'r') as f:
+                self.train_captions = json.load(f)
+        else:
+            # Minimal fallback: map each train image name to empty caption string
+            self.train_captions = {name: "" for name in self.train_image_name}
 
-        with open(os.path.join(self.path, 'keywords_in_mods_cirr_train.json'), 'r') as f:
-            self.key_words_train = json.load(f)
+        kw_train_path = os.path.join(self.path, 'keywords_in_mods_cirr_train.json')
+        if os.path.exists(kw_train_path):
+            with open(kw_train_path, 'r') as f:
+                self.key_words_train = json.load(f)
+        else:
+            self.key_words_train = {}
 
         # val data
-        with open(os.path.join(self.path, 'image_captions_cirr_val.json'), 'r') as f:
-            self.val_captions = json.load(f)
-        with open(os.path.join(self.path, 'keywords_in_mods_cirr_val.json'), 'r') as f:
-            self.key_words_val = json.load(f)
+        val_caps_path = os.path.join(self.path, 'image_captions_cirr_val.json')
+        if os.path.exists(val_caps_path):
+            with open(val_caps_path, 'r') as f:
+                self.val_captions = json.load(f)
+        else:
+            # Build names from val split file for a minimal mapping
+            with open(os.path.join(self.split_dir, "split.rc2.val.json"), 'r') as f:
+                _val_image_path = json.load(f)
+                _val_image_name = list(_val_image_path.keys())
+            self.val_captions = {name: "" for name in _val_image_name}
+
+        kw_val_path = os.path.join(self.path, 'keywords_in_mods_cirr_val.json')
+        if os.path.exists(kw_val_path):
+            with open(kw_val_path, 'r') as f:
+                self.key_words_val = json.load(f)
+        else:
+            self.key_words_val = {}
 
         if not os.path.exists(os.path.join(self.path, 'cirr_val_queries.pkl')):
             self.val_queries, self.val_targets = self.get_val_queries()
@@ -438,10 +461,23 @@ class CIRR_SavedSegment(torch.utils.data.Dataset):
         else:
             self.val_queries = load_obj(os.path.join(self.path, 'cirr_val_queries.pkl'))
             self.val_targets = load_obj(os.path.join(self.path, 'cirr_val_targets.pkl'))
-        with open(os.path.join(self.path, 'image_captions_cirr_test1.json'), 'r') as f:
-            self.test1_captions = json.load(f)
-        with open(os.path.join(self.path, 'keywords_in_mods_cirr_test1.json'), 'r') as f:
-            self.key_words_test1 = json.load(f)
+        test_caps_path = os.path.join(self.path, 'image_captions_cirr_test1.json')
+        if os.path.exists(test_caps_path):
+            with open(test_caps_path, 'r') as f:
+                self.test1_captions = json.load(f)
+        else:
+            # Build names from test1 split file for a minimal mapping
+            with open(os.path.join(self.split_dir, "split.rc2.test1.json"), 'r') as f:
+                _test_image_path = json.load(f)
+                _test_image_name = list(_test_image_path.keys())
+            self.test1_captions = {name: "" for name in _test_image_name}
+
+        kw_test_path = os.path.join(self.path, 'keywords_in_mods_cirr_test1.json')
+        if os.path.exists(kw_test_path):
+            with open(kw_test_path, 'r') as f:
+                self.key_words_test1 = json.load(f)
+        else:
+            self.key_words_test1 = {}
 
         if not os.path.exists(os.path.join(self.path, 'cirr_test_queries.pkl')):
             self.test_name_list, self.test_img_data, self.test_queries = self.get_test_queries()

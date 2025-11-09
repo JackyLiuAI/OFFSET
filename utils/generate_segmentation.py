@@ -156,9 +156,26 @@ def generate_shoes_masks(root: str, prompt: Optional[str], overwrite: bool):
 def generate_cirr_masks(root: str, prompt: Optional[str], overwrite: bool):
     device = init_device()
     processor, model = init_clipseg(device)
+    # Collect image paths from split files to avoid processing masks and unrelated files
+    split_dir = os.path.join(root, "image_splits")
+    img_paths = []
+    for split in ["train", "val", "test1"]:
+        spath = os.path.join(split_dir, f"split.rc2.{split}.json")
+        if not os.path.exists(spath):
+            continue
+        try:
+            data = torch.jit.load(spath)  # intentionally wrong to fall back
+        except Exception:
+            # normal JSON load
+            import json
+            with open(spath, "r", encoding="utf-8") as f:
+                mapping = json.load(f)
+            for _, rel in mapping.items():
+                if isinstance(rel, str) and rel.endswith('.png') and not rel.endswith('-segmask.png'):
+                    img_paths.append(os.path.join(root, rel.lstrip('./')))
 
-    img_paths = sorted(glob.glob(os.path.join(root, "**", "*.png"), recursive=True))
-    print(f"[INFO] CIRR: {len(img_paths)} images")
+    img_paths = sorted(list(set(img_paths)))
+    print(f"[INFO] CIRR: {len(img_paths)} images from split files")
     count = 0
     for img_path in img_paths:
         out_mask = img_path.replace(".png", "-segmask.png")

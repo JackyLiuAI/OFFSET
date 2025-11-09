@@ -88,6 +88,9 @@ def process_category(
             missing.append(image_id)
             return
         out_path = os.path.join(out_dir, image_id + ".jpg")
+        # skip if exists unless overwrite requested
+        if (not args.overwrite) and os.path.exists(out_path):
+            return
         save_resized(in_path, out_path, size)
         if (idx + 1) % 200 == 0:
             print(f"[{idx+1}/{num_images}] {category} resized")
@@ -104,65 +107,100 @@ def process_category(
         print(f"[DONE] {category}: all {num_images} images resized -> {out_dir}")
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Resize FashionIQ images by category from captions")
-    parser.add_argument(
-        "--images_dir",
-        type=str,
-        default="data/fashionIQ_dataset/images",
-        help="Directory containing original images",
-    )
-    parser.add_argument(
-        "--captions_dir",
-        type=str,
-        default="data/fashionIQ_dataset/captions",
-        help="Directory containing caption JSONs",
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default="data/fashionIQ_dataset/resized_image",
-        help="Output root dir to save resized images (with category subfolders)",
-    )
-    parser.add_argument(
-        "--image_size",
-        type=int,
-        default=256,
-        help="Square size to resize (width=height=image_size)",
-    )
-    parser.add_argument(
-        "--categories",
-        nargs="*",
-        default=["dress", "shirt", "toptee"],
-        help="Categories to process",
-    )
+def collect_cirr_image_paths(root: str) -> List[str]:
+    split_dir = os.path.join(root, "image_splits")
+    paths: Set[str] = set()
+    for split in ["train", "val", "test1"]:
+        fname = f"split.rc2.{split}.json"
+        spath = os.path.join(split_dir, fname)
+        data = load_json_safely(spath)
+        if not isinstance(data, dict):
+            print(f"[WARN] Bad or missing split file: {spath}")
+            continue
+        for _, rel in data.items():
+            if isinstance(rel, str):
+                # skip already generated masks
+                if rel.endswith("-segmask.png"):
+                    continue
+                paths.add(rel)
+    return sorted(list(paths))
 
+
+def resize_cirr_images(root: str, output_dir: str, size: int):
+    image_paths = collect_cirr_image_paths(root)
+    num_images = len(image_paths)
+    if num_images == 0:
+        print("[WARN] CIRR: no image paths collected from split files")
+        return
+    num_cores = multiprocessing.cpu_count()
+    print(f"[INFO] CIRR: {num_images} images, resizing on {num_cores} CPUs")
+
+    def op(idx: int, rel_path: str):
+        in_path = os.path.join(root, rel_path.lstrip("./"))
+        out_path = os.path.join(output_dir, rel_path.lstrip("./"))
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        # skip if exists unless overwrite requested
+        if (not args.overwrite) and os.path.exists(out_path):
+            return
+        with open(in_path, "rb") as f:
+            img = Image.open(f)
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            img = img.resize((size, size), Image.LANCZOS)
+            # Preserve PNG for CIRR
+            img.save(out_path, format="PNG")
+        if (idx + 1) % 200 == 0:
+            print(f"[{idx+1}/{num_images}] CIRR resized")
+
+    Parallel(n_jobs=num_cores)(delayed(op)(i, p) for i, p in enumerate(image_paths))
+    print(f"[DONE] CIRR: resized {num_images} images -> {output_dir}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Resize dataset images")
+    parser.add_argument("--dataset", choices=["fashioniq", "cirr"], default="fashioniq")
+    # FashionIQ args
+    parser.add_argument("--images_dir", type=str, default="data/fashionIQ_dataset/images")
+    parser.add_argument("--captions_dir", type=str, default="data/fashionIQ_dataset/captions")
+    parser.add_argument("--output_dir", type=str, default="data/fashionIQ_dataset/resized_image")
+    # CIRR args
+    parser.add_argument("--root", type=str, default="data/CIRR")
+    # Common args
+    parser.add_argument("--image_size", type=int, default=256)
+    parser.add_argument("--categories", nargs="*", default=["dress", "shirt", "toptee"])
+    parser.add_argument("--overwrite", action="store_true")
+
+    global args
     args = parser.parse_args()
 
-    images_dir = args.images_dir.rstrip("/")
-    captions_dir = args.captions_dir.rstrip("/")
-    output_dir = args.output_dir.rstrip("/")
     size = args.image_size
 
-    if not os.path.isdir(images_dir):
-        raise SystemExit(f"Images directory not found: {images_dir}")
-    if not os.path.isdir(captions_dir):
-        raise SystemExit(f"Captions directory not found: {captions_dir}")
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Collect IDs per category from captions
-    cat_to_ids: Dict[str, Set[str]] = {}
-    for cat in args.categories:
-        ids = collect_category_ids(captions_dir, cat)
-        if not ids:
-            print(f"[WARN] No IDs collected for {cat}. Check caption files.")
-        cat_to_ids[cat] = ids
-
-    # Process each category
-    for cat, ids in cat_to_ids.items():
-        if not ids:
-            continue
-        process_category(cat, ids, images_dir, output_dir, size)
+    if args.dataset == "fashioniq":
+        images_dir = args.images_dir.rstrip("/")
+        captions_dir = args.captions_dir.rstrip("/")
+        output_dir = args.output_dir.rstrip("/")
+        if not os.path.isdir(images_dir):
+            raise SystemExit(f"Images directory not found: {images_dir}")
+        if not os.path.isdir(captions_dir):
+            raise SystemExit(f"Captions directory not found: {captions_dir}")
+        os.makedirs(output_dir, exist_ok=True)
+        cat_to_ids: Dict[str, Set[str]] = {}
+        for cat in args.categories:
+            ids = collect_category_ids(captions_dir, cat)
+            if not ids:
+                print(f"[WARN] No IDs collected for {cat}. Check caption files.")
+            cat_to_ids[cat] = ids
+        for cat, ids in cat_to_ids.items():
+            if not ids:
+                continue
+            process_category(cat, ids, images_dir, output_dir, size)
+    else:  # CIRR
+        root = args.root.rstrip("/")
+        output_dir = args.output_dir.rstrip("/")
+        if not os.path.isdir(root):
+            raise SystemExit(f"CIRR root not found: {root}")
+        os.makedirs(output_dir, exist_ok=True)
+        resize_cirr_images(root, output_dir, size)
 
 
 if __name__ == "__main__":
