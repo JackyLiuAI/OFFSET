@@ -68,8 +68,8 @@ class Fusion_Embed(nn.Module):
 class Backbone(nn.Module):
     def __init__(self, hidden_dim=1024, dropout=0.0, local_token_num=8, global_token_num=8):
         super().__init__()
-        clip_path = '..'
-        self.clip, _, _ = open_clip.create_model_and_transforms('ViT-H-14', pretrained=os.path.join(clip_path, 'open_clip_pytorch_model.bin'))
+        # Use OpenCLIP official pretrained tag to auto-download weights
+        self.clip, _, _ = open_clip.create_model_and_transforms('ViT-H-14', pretrained='laion2b_s32b_b79k')
         self.clip = self.clip.float()
         self.tokenizer = open_clip.get_tokenizer('ViT-H-14')
 
@@ -78,15 +78,32 @@ class Backbone(nn.Module):
         self.text_fc = nn.Linear(1024,1024)
 
 
-        self.chanel_score_text = nn.Sequential(nn.Conv1d(hidden_dim, hidden_dim // 2, kernel_size=1, stride=1, bias=False),
-                                    nn.Tanh(),
-                                    nn.Conv1d(hidden_dim // 2, global_token_num, kernel_size=1, stride=1, bias=False),
-                                    nn.Softmax(dim=-1))
-        
-        self.chanel_score = nn.Sequential(nn.Conv1d(hidden_dim, hidden_dim // 2, kernel_size=1, stride=1, bias=False),
-                                    nn.Tanh(),
-                                    nn.Conv1d(hidden_dim // 2, global_token_num, kernel_size=1, stride=1, bias=False),
-                                    nn.Softmax(dim=-1))
+        # Token selection (scores) for global and local branches
+        self.chanel_score_text = nn.Sequential(
+            nn.Conv1d(hidden_dim, hidden_dim // 2, kernel_size=1, stride=1, bias=False),
+            nn.Tanh(),
+            nn.Conv1d(hidden_dim // 2, global_token_num, kernel_size=1, stride=1, bias=False),
+            nn.Softmax(dim=-1)
+        )
+        self.chanel_score_text_local = nn.Sequential(
+            nn.Conv1d(hidden_dim, hidden_dim // 2, kernel_size=1, stride=1, bias=False),
+            nn.Tanh(),
+            nn.Conv1d(hidden_dim // 2, local_token_num, kernel_size=1, stride=1, bias=False),
+            nn.Softmax(dim=-1)
+        )
+
+        self.chanel_score = nn.Sequential(
+            nn.Conv1d(hidden_dim, hidden_dim // 2, kernel_size=1, stride=1, bias=False),
+            nn.Tanh(),
+            nn.Conv1d(hidden_dim // 2, global_token_num, kernel_size=1, stride=1, bias=False),
+            nn.Softmax(dim=-1)
+        )
+        self.chanel_score_local = nn.Sequential(
+            nn.Conv1d(hidden_dim, hidden_dim // 2, kernel_size=1, stride=1, bias=False),
+            nn.Tanh(),
+            nn.Conv1d(hidden_dim // 2, local_token_num, kernel_size=1, stride=1, bias=False),
+            nn.Softmax(dim=-1)
+        )
 
         self.cross_attention = Cross_attention(1280, n_head=4)
         self.cross_attention_text = Cross_attention_1d(1024, n_head=4)
@@ -196,10 +213,14 @@ class Backbone(nn.Module):
         x = self.clip.transformer(x, attn_mask=self.clip.attn_mask)
         x = x.permute(1, 0, 2)  # LND -> NLD
         x = self.clip.ln_final(x)  # [batch_size, n_ctx, transformer.width]
-        pooled, tokens = text_global_pool(x, text, self.clip.text_pool_type)
+
+        # Standard CLIP EOT pooling (end-of-text token)
+        eot_indices = text.argmax(dim=-1)
+        pooled = x[torch.arange(x.shape[0]), eot_indices]
+
         if self.clip.text_projection is not None:
             if isinstance(self.clip.text_projection, nn.Linear):
-                pooled = self.clip.text_projection(x)
+                pooled = self.clip.text_projection(pooled)
             else:
                 pooled = pooled @ self.clip.text_projection
 
@@ -209,8 +230,8 @@ class Backbone(nn.Module):
         global_fea, local_fea = self.visual_out(x_ori)
         global_fea = global_fea.unsqueeze(1)
         x = self.fc(local_fea.float())
-        global_tokens = torch.matmul(self.chanel_score(global_fea.transpose(1, 2)), global_fea)#self.global_attention(global_fea.unsqueeze(1))
-        local_tokens = torch.matmul(self.chanel_score(x.transpose(1, 2)), x)
+        global_tokens = torch.matmul(self.chanel_score(global_fea.transpose(1, 2)), global_fea)
+        local_tokens = torch.matmul(self.chanel_score_local(x.transpose(1, 2)), x)
         return torch.cat([global_tokens, local_tokens], dim=1), (global_fea, global_fea.unsqueeze(1))
 
     def extract_img_seg_cross_fea(self, x_ori, x_seg):
@@ -223,9 +244,8 @@ class Backbone(nn.Module):
 
         global_fea = torch.cat([(x[:, 0, :] @ self.clip.visual.proj + global_fea).unsqueeze(1) , global_fea.unsqueeze(1), global_seg.unsqueeze(1)], dim=1)
         x = self.fc(x.float())
-        global_tokens = torch.matmul(self.chanel_score(global_fea.transpose(1, 2)), global_fea)#self.global_attention(global_fea.unsqueeze(1))
-        
-        local_tokens = torch.matmul(self.chanel_score(x.transpose(1, 2)), x)
+        global_tokens = torch.matmul(self.chanel_score(global_fea.transpose(1, 2)), global_fea)
+        local_tokens = torch.matmul(self.chanel_score_local(x.transpose(1, 2)), x)
         return torch.cat([global_tokens, local_tokens], dim=1), (global_fea, global_seg.unsqueeze(1))
     
 
@@ -237,10 +257,8 @@ class Backbone(nn.Module):
         seg_text = self.segText_fusion(torch.concat([out_enc_level4_A, out_enc_level4_B], dim=1)).transpose(1, 2)
         global_fea = torch.cat([seg_text + global_fea.unsqueeze(1), global_fea.unsqueeze(1), seg_local_fea], dim=1)
         x = self.text_fc(x.float())
-        # global_tokens = self.global_attention(global_fea.unsqueeze(1))
-        # local_tokens = self.local_attention(self.text_fc(x.float()))
-        global_tokens = torch.matmul(self.chanel_score_text(global_fea.transpose(1, 2)), global_fea)#self.global_attention(global_fea.unsqueeze(1))
-        local_tokens = torch.matmul(self.chanel_score_text(x.transpose(1, 2)), x)
+        global_tokens = torch.matmul(self.chanel_score_text(global_fea.transpose(1, 2)), global_fea)
+        local_tokens = torch.matmul(self.chanel_score_text_local(x.transpose(1, 2)), x)
         return torch.cat([global_tokens, local_tokens], dim=1), (global_fea, x)
     
     def extract_text_fea(self, txt):
@@ -248,8 +266,8 @@ class Backbone(nn.Module):
         global_fea, x = self.text_out(txt)
         global_fea = global_fea.unsqueeze(1)
         x = self.text_fc(x.float())
-        global_tokens = torch.matmul(self.chanel_score_text(global_fea.transpose(1, 2)), global_fea)#self.global_attention(global_fea.unsqueeze(1))
-        local_tokens = torch.matmul(self.chanel_score_text(x.transpose(1, 2)), x)
+        global_tokens = torch.matmul(self.chanel_score_text(global_fea.transpose(1, 2)), global_fea)
+        local_tokens = torch.matmul(self.chanel_score_text_local(x.transpose(1, 2)), x)
         return torch.cat([global_tokens, local_tokens], dim=1), (global_fea, x)
 
 class FeatureWiseAffine(nn.Module):
@@ -447,22 +465,23 @@ class OFFSET(nn.Module):
         return F.mse_loss(mask,y)
 
     def info_nce(self, query, target):
-        x = torch.mm(query, target.T)
-        labels = torch.arange(query.shape[0]).long().cuda()
+        x = torch.mm(query.float(), target.float().T)
+        labels = torch.arange(query.shape[0], device=x.device).long()
         return F.cross_entropy(x * self.loss_T, labels)
 
     
     def kl_div(self, x1, y1, x2, y2, t):
-        x1 = F.normalize(x1, p=2, dim=-1)
-        y1 = F.normalize(y1, p=2, dim=-1)
-        x2 = F.normalize(x2, p=2, dim=-1)
-        y2 = F.normalize(y2, p=2, dim=-1)
+        # enforce float32 for stability under autocast and detach target path
+        x1 = F.normalize(x1.float(), p=2, dim=-1)
+        y1 = F.normalize(y1.float(), p=2, dim=-1)
+        x2 = F.normalize(x2.float(), p=2, dim=-1)
+        y2 = F.normalize(y2.float(), p=2, dim=-1)
 
         x1_y1 = torch.mm(x1, y1.T) / t
         x2_y2 = torch.mm(x2, y2.T) / t
 
         log_soft_x1 = F.log_softmax(x1_y1, dim=1)
-        soft_x2 = F.softmax(torch.autograd.Variable(x2_y2), dim=1)
+        soft_x2 = F.softmax(x2_y2.detach(), dim=1)
         kl = F.kl_div(log_soft_x1, soft_x2, reduction='batchmean')
 
         return kl

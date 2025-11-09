@@ -16,6 +16,26 @@ def load_obj(path):
     with open(path, 'rb') as f:
         return pickle.load(f)
     
+def generate_correction_dict(caption_dir, name, ref_captions):
+    trans = str.maketrans({key: ' ' for key in string.punctuation})
+    tokens = set()
+    for triplet in ref_captions:
+        for cap in triplet.get('captions', []):
+            t = str(cap).lower().translate(trans).strip().split()
+            tokens.update(t)
+    mapping = {w: w for w in tokens}
+    common = {
+        'grey': 'gray', 'colour': 'color', 'tee': 't-shirt', 'tee-shirt': 't-shirt',
+        'tshirt': 't-shirt', 't-shirts': 't-shirt', 'blouses': 'blouse', 'shirts': 'shirt',
+        'dresses': 'dress', 'tops': 'top', 'tees': 't-shirt', 'polkadot': 'polka dot',
+        'polka-dot': 'polka dot', 'stripes': 'stripe', 'striped': 'stripe'
+    }
+    mapping.update(common)
+    out_path = os.path.join(caption_dir, f'correction_dict_{name}.json')
+    with open(out_path, 'w') as f:
+        json.dump(mapping, f)
+    return mapping
+    
 class FashionIQ_SavedSegment_all(torch.utils.data.Dataset):
     def __init__(self, path, transform=None, split='val-split'):
         super().__init__()
@@ -57,8 +77,12 @@ class FashionIQ_SavedSegment_all(torch.utils.data.Dataset):
         for name in ['dress', 'shirt', 'toptee']:
             with open(os.path.join(self.caption_dir, "cap.{}.{}.json".format(name, 'train')), 'r') as f:
                 ref_captions = json.load(f)
-            with open(os.path.join(self.caption_dir, 'correction_dict_{}.json'.format(name)), 'r') as f:
-                correction_dict = json.load(f)
+            corr_path = os.path.join(self.caption_dir, 'correction_dict_{}.json'.format(name))
+            if os.path.exists(corr_path):
+                with open(corr_path, 'r') as f:
+                    correction_dict = json.load(f)
+            else:
+                correction_dict = generate_correction_dict(self.caption_dir, name, ref_captions)
             for triplets in ref_captions:
                 ref_id = triplets['candidate']
                 tag_id = triplets['target']

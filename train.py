@@ -33,7 +33,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--local_rank', default=os.getenv('LOCAL_RANK', -1), type=int)
 parser.add_argument('--dataset', default = 'dress', help = "data set type")
 parser.add_argument('--fashioniq_split', default = 'val-split')
-parser.add_argument('--fashioniq_path', default = "")
+parser.add_argument('--fashioniq_path', default = "data/fashionIQ_dataset/")
 parser.add_argument('--shoes_path', default = "")
 parser.add_argument('--cirr_path', default = "")
 
@@ -70,22 +70,24 @@ parser.add_argument('--ifSave', type=int, default=0)
 
  
 parser.add_argument('--model_dir', default='./checkpoints',
-                    help="Directory containing params.json")
+                    help="Directory containing params.json") # 保存模型路径
 
 parser.add_argument('--save_summary_steps', type=int, default=5)
 parser.add_argument('--num_workers', type=int, default=8)
 parser.add_argument('--i', type=str, default='0')
+parser.add_argument('--no_amp', action='store_true', help='Disable mixed precision (AMP) for debugging')
 
 args = parser.parse_args()
 
 
 def load_dataset():
-    clip_path = '...'
-    _, preprocess_train, preprocess_val = open_clip.create_model_and_transforms('ViT-H-14', pretrained=os.path.join(clip_path, 'open_clip_pytorch_model.bin'))
+    # Use OpenCLIP pretrained tag for transforms; avoids missing local weights
+    _, preprocess_train, preprocess_val = open_clip.create_model_and_transforms('ViT-H-14', pretrained='laion2b_s32b_b79k')
     
     if args.dataset in ['dress', 'shirt', 'toptee']:
         print('Loading FashionIQ-{} dataset'.format(args.dataset))
-        fashioniq_dataset = datasets.FashionIQ_Segment(path = args.fashioniq_path, category = args.dataset, transform = [preprocess_train, preprocess_val], split = args.fashioniq_split)
+        # Use the available aggregated FashionIQ dataset implementation
+        fashioniq_dataset = datasets.FashionIQ_SavedSegment_all(path = args.fashioniq_path, transform = [preprocess_train, preprocess_val], split = args.fashioniq_split)
         return [fashioniq_dataset]
     elif args.dataset == 'fashioniq':
         print('Reading fashioniq')
@@ -134,14 +136,18 @@ def train(model, optimizer, dataloader, scaler):
             img2_seg = data['target_img_data_seg'].cuda()
             mods = data['mod']['str']
             optimizer.zero_grad()
-            with autocast():
+            if args.no_amp:
                 loss = model.compute_loss(img1, mods, img2, img1_seg, img2_seg)
-                total_loss = loss['rank'] \
-                + args.kappa_ * loss['fr'] \
-
-            scaler.scale(total_loss).backward()
-            scaler.step(optimizer)
-            scaler.update()     
+                total_loss = loss['rank'] + args.kappa_ * loss['fr']
+                total_loss.backward()
+                optimizer.step()
+            else:
+                with autocast():
+                    loss = model.compute_loss(img1, mods, img2, img1_seg, img2_seg)
+                    total_loss = loss['rank'] + args.kappa_ * loss['fr']
+                scaler.scale(total_loss).backward()
+                scaler.step(optimizer)
+                scaler.update()     
 
             if i % args.save_summary_steps == 0:
                 summary_batch = {}
@@ -248,6 +254,8 @@ if __name__ == '__main__':
     np.random.seed(seed)  # Numpy module.
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.enabled = False  # disable cuDNN due to library/runtime mismatch
+    torch.autograd.set_detect_anomaly(True)  # surface precise autograd failure locations
     if not os.path.exists(args.model_dir):
         os.makedirs(args.model_dir)
 
