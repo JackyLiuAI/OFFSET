@@ -37,7 +37,7 @@ def generate_correction_dict(caption_dir, name, ref_captions):
     return mapping
     
 class FashionIQ_SavedSegment_all(torch.utils.data.Dataset):
-    def __init__(self, path, transform=None, split='val-split'):
+    def __init__(self, path, transform=None, split='val-split', categories=None):
         super().__init__()
 
         self.path = path
@@ -46,35 +46,43 @@ class FashionIQ_SavedSegment_all(torch.utils.data.Dataset):
         self.caption_dir = self.path + 'captions'
         self.transform = transform
         self.split = split
-        if not os.path.exists(os.path.join(self.path, 'fashion_iq_data.json')):
+        # categories: limit training data to specific FashionIQ category(ies).
+        # None or all -> use aggregated cache if available; otherwise recompute.
+        self.categories = categories or ['dress', 'shirt', 'toptee']
+        agg_json_path = os.path.join(self.path, 'fashion_iq_data.json')
+        use_aggregated = set(self.categories) == {'dress', 'shirt', 'toptee'}
+
+        if use_aggregated and os.path.exists(agg_json_path):
+            with open(agg_json_path, 'r') as f:
+                self.fashioniq_data = json.load(f)
+        else:
+            # Build training data only for requested categories
             self.fashioniq_data = []
             self.train_init_process()
-            with open(os.path.join(self.path, 'fashion_iq_data.json'), 'w') as f:
-                json.dump(self.fashioniq_data, f)
+            # Only write aggregated file when building all categories
+            if use_aggregated:
+                with open(agg_json_path, 'w') as f:
+                    json.dump(self.fashioniq_data, f)
 
-            self.test_queries_dress, self.test_targets_dress = self.get_test_data('dress')
-            self.test_queries_shirt, self.test_targets_shirt = self.get_test_data('shirt')
-            self.test_queries_toptee, self.test_targets_toptee = self.get_test_data('toptee')
-            save_obj(self.test_queries_dress, os.path.join(self.path, 'test_queries_dress.pkl'))
-            save_obj(self.test_targets_dress, os.path.join(self.path, 'test_targets_dress.pkl'))
-            save_obj(self.test_queries_shirt, os.path.join(self.path, 'test_queries_shirt.pkl'))
-            save_obj(self.test_targets_shirt, os.path.join(self.path, 'test_targets_shirt.pkl'))
-            save_obj(self.test_queries_toptee, os.path.join(self.path, 'test_queries_toptee.pkl'))
-            save_obj(self.test_targets_toptee, os.path.join(self.path, 'test_targets_toptee.pkl'))
-
-        else:
-            with open(os.path.join(self.path, 'fashion_iq_data.json'), 'r') as f:
-                self.fashioniq_data = json.load(f) 
-            self.test_queries_dress = load_obj(os.path.join(self.path, 'test_queries_dress.pkl'))
-            self.test_targets_dress = load_obj(os.path.join(self.path, 'test_targets_dress.pkl'))
-            self.test_queries_shirt = load_obj(os.path.join(self.path, 'test_queries_shirt.pkl'))
-            self.test_targets_shirt = load_obj(os.path.join(self.path, 'test_targets_shirt.pkl'))
-            self.test_queries_toptee = load_obj(os.path.join(self.path, 'test_queries_toptee.pkl'))
-            self.test_targets_toptee = load_obj(os.path.join(self.path, 'test_targets_toptee.pkl'))
+        # Prepare per-category test queries/targets only for requested categories
+        for name in self.categories:
+            q_attr = f'test_queries_{name}'
+            t_attr = f'test_targets_{name}'
+            q_pkl = os.path.join(self.path, f'test_queries_{name}.pkl')
+            t_pkl = os.path.join(self.path, f'test_targets_{name}.pkl')
+            if os.path.exists(q_pkl) and os.path.exists(t_pkl):
+                setattr(self, q_attr, load_obj(q_pkl))
+                setattr(self, t_attr, load_obj(t_pkl))
+            else:
+                q_data, t_data = self.get_test_data(name)
+                setattr(self, q_attr, q_data)
+                setattr(self, t_attr, t_data)
+                save_obj(q_data, q_pkl)
+                save_obj(t_data, t_pkl)
 
 
     def train_init_process(self):
-        for name in ['dress', 'shirt', 'toptee']:
+        for name in self.categories:
             with open(os.path.join(self.caption_dir, "cap.{}.{}.json".format(name, 'train')), 'r') as f:
                 ref_captions = json.load(f)
             corr_path = os.path.join(self.caption_dir, 'correction_dict_{}.json'.format(name))

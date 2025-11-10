@@ -9,6 +9,7 @@ import torch
 import torch.optim as optim 
 from torch.autograd import Variable
 from torch.utils.data import dataloader
+from torch.utils.data import ConcatDataset
 from tqdm import tqdm
 
 import open_clip 
@@ -32,6 +33,8 @@ import time
 parser = argparse.ArgumentParser()
 parser.add_argument('--local_rank', default=os.getenv('LOCAL_RANK', -1), type=int)
 parser.add_argument('--dataset', default = 'dress', help = "data set type")
+parser.add_argument('--multi_datasets', nargs='*', default=[],
+                    help="Train jointly on multiple datasets. Accepted items: dress, shirt, toptee, cirr, shoes")
 parser.add_argument('--fashioniq_split', default = 'val-split')
 parser.add_argument('--fashioniq_path', default = "data/fashionIQ_dataset/")
 parser.add_argument('--shoes_path', default = "")
@@ -84,14 +87,57 @@ def load_dataset():
     # Use OpenCLIP pretrained tag for transforms; avoids missing local weights
     _, preprocess_train, preprocess_val = open_clip.create_model_and_transforms('ViT-H-14', pretrained='laion2b_s32b_b79k')
     
+    # Joint multi-dataset training
+    if args.multi_datasets:
+        train_parts = []
+        eval_parts = []
+        for name in args.multi_datasets:
+            if name in ['dress', 'shirt', 'toptee']:
+                print(f'Loading FashionIQ-{name} dataset')
+                dset = datasets.FashionIQ_SavedSegment_all(
+                    path=args.fashioniq_path,
+                    transform=[preprocess_train, preprocess_val],
+                    split=args.fashioniq_split,
+                    categories=[name]
+                )
+                # annotate for evaluation routing
+                setattr(dset, '_kind', 'fashioniq')
+                setattr(dset, '_category', name)
+            elif name == 'cirr':
+                print('Loading CIRR dataset')
+                dset = datasets.CIRR_SavedSegment(path=args.cirr_path, transform=[preprocess_train, preprocess_val])
+                setattr(dset, '_kind', 'cirr')
+                setattr(dset, '_category', 'cirr')
+            elif name == 'shoes':
+                print('Loading Shoes dataset')
+                dset = datasets.Shoes_SavedSegment(path=args.shoes_path, transform=[preprocess_train, preprocess_val])
+                setattr(dset, '_kind', 'shoes')
+                setattr(dset, '_category', 'shoes')
+            else:
+                raise ValueError(f'Unsupported dataset in --multi_datasets: {name}')
+            train_parts.append(dset)
+            eval_parts.append(dset)
+        train_concat = ConcatDataset(train_parts)
+        return [train_concat] + eval_parts
+
     if args.dataset in ['dress', 'shirt', 'toptee']:
         print('Loading FashionIQ-{} dataset'.format(args.dataset))
-        # Use the available aggregated FashionIQ dataset implementation
-        fashioniq_dataset = datasets.FashionIQ_SavedSegment_all(path = args.fashioniq_path, transform = [preprocess_train, preprocess_val], split = args.fashioniq_split)
+        # Restrict training data to the selected category only
+        fashioniq_dataset = datasets.FashionIQ_SavedSegment_all(
+            path=args.fashioniq_path,
+            transform=[preprocess_train, preprocess_val],
+            split=args.fashioniq_split,
+            categories=[args.dataset]
+        )
         return [fashioniq_dataset]
     elif args.dataset == 'fashioniq':
-        print('Reading fashioniq')
-        fashioniq_dataset = datasets.FashionIQ_SavedSegment_all(path = args.fashioniq_path, transform = [preprocess_train, preprocess_val], split = args.fashioniq_split)
+        print('Reading fashioniq (all categories)')
+        fashioniq_dataset = datasets.FashionIQ_SavedSegment_all(
+            path=args.fashioniq_path,
+            transform=[preprocess_train, preprocess_val],
+            split=args.fashioniq_split,
+            categories=['dress', 'shirt', 'toptee']
+        )
         return [fashioniq_dataset]
     elif args.dataset == 'shoes':
         print('Reading shoes')
@@ -184,56 +230,88 @@ def train_and_evaluate(model, optimizer, dataset_list):
         current_score = 0
         current_result = []
         if tolerance < args.tolerance_epoch:
-            if args.dataset in ['dress', 'shirt', 'toptee', 'shoes']:
+            if args.multi_datasets:
+                combined_metrics = {}
+                current_result = []
                 with torch.no_grad():
-                    t = test.test(args, model, dataset_list[0], args.dataset)
-                logging.info(t)
-                current_score = current_score + t[1][1] + t[2][1]
-            elif args.dataset in ['fashioniq']:
-                for ci, category in enumerate(['dress', 'shirt', 'toptee']):
-                    t = test.test_figAll(args, model, dataset_list[0], category)
-                    logging.info(t)
-                    current_score = current_score + t[1][1]
-                    current_result.append(t)
-                if args.ifSave == 1:
-                    torch.save(model, os.path.join(args.model_dir, "{}_epoch{}.pt".format(args.dataset, epoch)))
+                    for dset in dataset_list[1:]:
+                        kind = getattr(dset, '_kind', None)
+                        category = getattr(dset, '_category', None)
+                        if kind == 'fashioniq' and category in ['dress','shirt','toptee']:
+                            t = test.test(args, model, dset, category)
+                            logging.info(t)
+                            # use r@10 and r@50 to accumulate score similar to single-category case
+                            current_score += t[1][1] + t[2][1]
+                            current_result.append(t)
+                            for metric_name, metric_value in t:
+                                combined_metrics[f'{category}_{metric_name}'] = metric_value
+                        elif kind == 'cirr':
+                            t = test.test_cirr_valset(args, model, dset)
+                            logging.info(t)
+                            # accumulate mean across cirr metrics
+                            current_score += sum(v for _, v in t) / len(t)
+                            current_result.append(t)
+                            for metric_name, metric_value in t:
+                                combined_metrics[metric_name] = metric_value
+                        elif kind == 'shoes':
+                            t = test.test(args, model, dset, 'shoes')
+                            logging.info(t)
+                            current_score += t[1][1] + t[2][1]
+                            current_result.append(t)
+                            for metric_name, metric_value in t:
+                                combined_metrics[f'shoes_{metric_name}'] = metric_value
+                        else:
+                            logging.warning(f'Unknown dataset kind for evaluation: {kind}')
                 if current_score > best_score:
                     best_score = current_score
                     tolerance = 0
-                    best_json_path_combine = os.path.join(
-                            args.model_dir, "metrics_best.json")
-                    test_metrics = {}
-                    
-                    for _ in current_result:
-                        for metric_name, metric_value in _:
+                    best_json_path_combine = os.path.join(args.model_dir, "metrics_best_multi.json")
+                    utils.save_dict_to_json(combined_metrics, best_json_path_combine)
+                    # save unified weights
+                    if args.ifSave == 1:
+                        torch.save(model, os.path.join(args.model_dir, "multi_{}_best_model.pt".format(args.i)))
+            else:
+                if args.dataset in ['dress', 'shirt', 'toptee', 'shoes']:
+                    with torch.no_grad():
+                        t = test.test(args, model, dataset_list[0], args.dataset)
+                    logging.info(t)
+                    current_score = current_score + t[1][1] + t[2][1]
+                elif args.dataset in ['fashioniq']:
+                    for ci, category in enumerate(['dress', 'shirt', 'toptee']):
+                        t = test.test_figAll(args, model, dataset_list[0], category)
+                        logging.info(t)
+                        current_score = current_score + t[1][1]
+                        current_result.append(t)
+                    if args.ifSave == 1:
+                        torch.save(model, os.path.join(args.model_dir, "{}_epoch{}.pt".format(args.dataset, epoch)))
+                    if current_score > best_score:
+                        best_score = current_score
+                        tolerance = 0
+                        best_json_path_combine = os.path.join(args.model_dir, "metrics_best.json")
+                        test_metrics = {}
+                        for _ in current_result:
+                            for metric_name, metric_value in _:
+                                test_metrics[metric_name] = metric_value
+                        utils.save_dict_to_json(test_metrics, best_json_path_combine)
+                elif args.dataset in ['fashion200k']:
+                    t = test.test_fashion200k_dataset(args, model, fashion200k_testset)
+                    logging.info(t)
+                    current_score = current_score + t[0][1] + t[1][1] + t[2][1]
+                elif args.dataset in ['cirr']:
+                    t = test.test_cirr_valset(args, model, dataset_list[0])
+                    logging.info(t)
+                    current_score = current_score + t[0][1] + t[1][1] + t[2][1] + t[3][1] + t[4][1] + t[5][1] + t[6][1]
+                if not args.multi_datasets:
+                    if current_score > best_score:
+                        best_score = current_score
+                        tolerance = 0
+                        best_json_path = os.path.join(args.model_dir, "{}_{}_metrics_best.json".format(args.dataset, args.i))
+                        test_metrics = {}
+                        for metric_name, metric_value in t:
                             test_metrics[metric_name] = metric_value
-
-                    utils.save_dict_to_json(test_metrics, best_json_path_combine)
-                    best_parameters_model = model
-            
-            elif args.dataset in ['fashion200k']:
-                t = test.test_fashion200k_dataset(args, model, fashion200k_testset)
-                logging.info(t)
-                current_score = current_score + t[0][1] + t[1][1] + t[2][1]
-            
-            elif args.dataset in ['cirr']:
-                t = test.test_cirr_valset(args, model, dataset_list[0])
-                logging.info(t)
-                current_score = current_score + t[0][1] + t[1][1] + t[2][1] + t[3][1] + t[4][1] + t[5][1] + t[6][1] # mean best
-            
-            if current_score > best_score:
-                best_score = current_score
-                tolerance = 0
-                best_json_path = os.path.join(
-                    args.model_dir, "{}_{}_metrics_best.json".format(args.dataset, args.i))
-                test_metrics = {}
-                for metric_name, metric_value in t:
-                    test_metrics[metric_name] = metric_value
-
-                utils.save_dict_to_json(test_metrics, best_json_path)
-                # save model
-                if args.dataset == 'cirr' or args.ifSave == 1:
-                    torch.save(model, os.path.join(args.model_dir, "{}_{}_best_model.pt".format(args.dataset, args.i)))
+                        utils.save_dict_to_json(test_metrics, best_json_path)
+                        if args.dataset == 'cirr' or args.ifSave == 1:
+                            torch.save(model, os.path.join(args.model_dir, "{}_{}_best_model.pt".format(args.dataset, args.i)))
         else:
             break
 
